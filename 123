@@ -1,0 +1,486 @@
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+
+repeat
+    task.wait()
+until game:IsLoaded()
+repeat
+    task.wait()
+until Players.LocalPlayer
+
+local player = Players.LocalPlayer
+
+getgenv().AT_Config = getgenv().AT_Config or {
+    TransparencyEnabled = false,
+}
+if getgenv().TransparencyEnabled == nil then
+    getgenv().TransparencyEnabled = getgenv().AT_Config.TransparencyEnabled
+end
+
+if getgenv().AtomicUnload then
+    pcall(getgenv().AtomicUnload)
+end
+
+local Utils = {}
+
+function Utils.GetTextGradient(text, startColor, endColor, fontSize)
+    local result = ""
+    local length = utf8.len(text)
+    if not length then return text end
+
+    local i = 0
+    for _, code in utf8.codes(text) do
+        local char = utf8.char(code)
+        local t = i / math.max(length - 1, 1)
+        local r = startColor.R + (endColor.R - startColor.R) * t
+        local g = startColor.G + (endColor.G - startColor.G) * t
+        local b = startColor.B + (endColor.B - startColor.B) * t
+        if fontSize then
+            result = result .. string.format(
+                '<font color="rgb(%d,%d,%d)" size="%d">%s</font>',
+                math.floor(r * 255), math.floor(g * 255), math.floor(b * 255), fontSize, char
+            )
+        else
+            result = result .. string.format(
+                '<font color="rgb(%d,%d,%d)">%s</font>',
+                math.floor(r * 255), math.floor(g * 255), math.floor(b * 255), char
+            )
+        end
+        i = i + 1
+    end
+    return result
+end
+
+local UIEffects = {
+    FlowSpeed = 5.5,
+    BorderThickness = 1.7,
+    Theme = ColorSequence.new({
+        ColorSequenceKeypoint.new(0.00, Color3.fromHex("1A0101")),
+        ColorSequenceKeypoint.new(0.25, Color3.fromHex("5A0A0A")),
+        ColorSequenceKeypoint.new(0.45, Color3.fromHex("C80000")),
+        ColorSequenceKeypoint.new(0.55, Color3.fromHex("FFFFFF")),
+        ColorSequenceKeypoint.new(0.75, Color3.fromHex("B02B2B")),
+        ColorSequenceKeypoint.new(1.00, Color3.fromHex("1F0303")),
+    }),
+    Connection = nil,
+}
+
+function UIEffects.InitBorder(window)
+    local mainFrame = window and window.UIElements and window.UIElements.Main
+    if not mainFrame then return end
+
+    if not mainFrame:FindFirstChildOfClass("UICorner") then
+        local corner = Instance.new("UICorner")
+        corner.CornerRadius = UDim.new(0, 16)
+        corner.Parent = mainFrame
+    end
+
+    local stroke = mainFrame:FindFirstChild("FlowBorder") or Instance.new("UIStroke")
+    stroke.Name = "FlowBorder"
+    stroke.Thickness = UIEffects.BorderThickness
+    stroke.Color = Color3.new(1, 1, 1)
+    stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+    stroke.LineJoinMode = Enum.LineJoinMode.Round
+    stroke.Parent = mainFrame
+
+    local gradient = stroke:FindFirstChild("StreamEffect") or Instance.new("UIGradient")
+    gradient.Name = "StreamEffect"
+    gradient.Color = UIEffects.Theme
+    gradient.Parent = stroke
+
+    if UIEffects.Connection then UIEffects.Connection:Disconnect() end
+    local borderAccum = 0
+    UIEffects.Connection = RunService.Heartbeat:Connect(function(dt)
+        if not stroke.Parent then
+            UIEffects.Connection:Disconnect()
+            return
+        end
+        borderAccum = borderAccum + dt
+        if borderAccum < 0.05 then return end
+        borderAccum = 0
+        gradient.Rotation = (tick() * UIEffects.FlowSpeed * 20) % 360
+    end)
+end
+
+local WindUI = getgenv().AtomicWindUI
+if not WindUI then
+    WindUI = loadstring(game:HttpGet("https://raw.githubusercontent.com/123fa98/Xi_Pro/refs/heads/main/UI.lua"))()
+    getgenv().AtomicWindUI = WindUI
+end
+
+local Window = WindUI:CreateWindow({
+    Title = Utils.GetTextGradient("定制 ", Color3.fromHex("#00DBDE"), Color3.fromHex("#FC00FF"))
+        .. Utils.GetTextGradient("V1", Color3.fromHex("#FC00FF"), Color3.fromHex("#00DBDE"), 13)
+        .. "   ",
+    Author = Utils.GetTextGradient("蜜蜂", Color3.fromHex("#00FF87"), Color3.fromHex("#60EFFF")),
+    IconThemed = true,
+    Folder = "Atomic",
+    Size = UDim2.fromOffset(150, 100),
+    Transparent = getgenv().TransparencyEnabled,
+    Theme = "Dark",
+    Resizable = true,
+    SideBarWidth = 150,
+    HideSearchBar = true,
+    ScrollBarEnabled = true,
+})
+
+Window:EditOpenButton({
+    Title = "[Atomic]",
+    CornerRadius = UDim.new(0, 8),
+    StrokeThickness = 4,
+    Color = ColorSequence.new({
+        ColorSequenceKeypoint.new(0, Color3.fromHex("1E3A8A")),
+        ColorSequenceKeypoint.new(0.5, Color3.fromHex("118AB2")),
+        ColorSequenceKeypoint.new(1, Color3.fromHex("06D6A0")),
+    }),
+    Draggable = true,
+})
+Window:SetToggleKey(Enum.KeyCode.F, true)
+
+
+local mainTab = Window:Tab({ Title = "主要功能", Icon = "swords" })
+
+local hubRunning = true
+local Atomic = {}
+local AutoHarvestActive = false
+local AutoCollectDropsActive = false
+local _harvestThread = nil
+local _collectDropsThread = nil
+
+local function getCharacterRoot()
+    local character = player.Character
+    if not character then return nil end
+    return character:FindFirstChild("HumanoidRootPart")
+end
+
+local function startAutoHarvest()
+    if _harvestThread then return end
+
+    _harvestThread = task.spawn(function()
+        while hubRunning and AutoHarvestActive do
+            local clickEvent = ReplicatedStorage.remoteFunctions
+                and ReplicatedStorage.remoteFunctions.toolClick
+            if not clickEvent then
+                warn("[自动采蜜] 找不到 toolClick 远程事件")
+                AutoHarvestActive = false
+                break
+            end
+
+            pcall(function()
+                clickEvent:InvokeServer()
+            end)
+
+            task.wait(0.1)
+        end
+        _harvestThread = nil
+    end)
+end
+
+local function stopAutoHarvest()
+    AutoHarvestActive = false
+end
+
+local function remoteMakeHoney()
+    local event = ReplicatedStorage.remoteEvents and ReplicatedStorage.remoteEvents.makeHoney
+    if not event then
+        warn("[远程酿蜜] 找不到 makeHoney 远程事件")
+        return
+    end
+    pcall(function()
+        event:FireServer()
+    end)
+end
+
+local DROP_FOLDER_NAMES = {
+    "Drops",
+    "DropItems",
+    "DroppedItems",
+    "Loot",
+    "Pickups",
+    "Collectibles",
+}
+
+local DROP_NAME_KEYWORDS = {
+    "drop",
+    "loot",
+    "pickup",
+    "collect",
+    "coin",
+    "cash",
+    "money",
+    "item",
+    "orb",
+    "gem",
+}
+
+local function getOwnerPlayer(instance)
+    local current = instance
+    while current and current ~= workspace do
+        if current:IsA("Model") then
+            local owner = Players:GetPlayerFromCharacter(current)
+            if owner then
+                return owner
+            end
+        end
+
+        if current:IsA("Backpack") and current.Parent and current.Parent:IsA("Player") then
+            return current.Parent
+        end
+
+        current = current.Parent
+    end
+    return nil
+end
+
+local function isOtherPlayerOwned(instance)
+    local owner = getOwnerPlayer(instance)
+    return owner ~= nil and owner ~= player
+end
+
+local function isOnAnyPlayer(instance)
+    return getOwnerPlayer(instance) ~= nil
+end
+
+local function isDropCandidate(instance)
+    if not instance or not instance.Parent then
+        return false
+    end
+
+    if isOnAnyPlayer(instance) then
+        return false
+    end
+
+    if instance:IsA("Tool") then
+        return false
+    end
+
+    if instance:IsA("Accessory") then
+        return false
+    end
+
+    if instance:IsA("Model") then
+        if instance:FindFirstChildOfClass("Humanoid") then
+            return false
+        end
+
+        local primary = instance.PrimaryPart or instance:FindFirstChildWhichIsA("BasePart", true)
+        return primary ~= nil
+    end
+
+    if instance:IsA("BasePart") and not instance:IsA("Terrain") then
+        if instance:FindFirstChild("TouchInterest") then
+            return true
+        end
+
+        local parent = instance.Parent
+        if parent and parent:IsA("Model") and not parent:FindFirstChildOfClass("Humanoid") then
+            return true
+        end
+    end
+
+    return false
+end
+
+local function getDropPart(instance)
+    if instance:IsA("BasePart") then
+        return instance
+    end
+
+    if instance:IsA("Model") then
+        return instance.PrimaryPart or instance:FindFirstChildWhichIsA("BasePart", true)
+    end
+
+    return nil
+end
+
+local function matchesDropKeyword(name)
+    local lowerName = string.lower(name or "")
+    for _, keyword in ipairs(DROP_NAME_KEYWORDS) do
+        if string.find(lowerName, keyword, 1, true) then
+            return true
+        end
+    end
+    return false
+end
+
+local function collectDropPart(root, dropPart)
+    if not root or not dropPart then return false end
+
+    local collected = false
+
+    if dropPart:FindFirstChild("TouchInterest") then
+        pcall(function()
+            firetouchinterest(root, dropPart, 0)
+            task.wait(0.05)
+            firetouchinterest(root, dropPart, 1)
+        end)
+        collected = true
+    end
+
+    for _, descendant in ipairs(dropPart:GetDescendants()) do
+        if descendant:IsA("ProximityPrompt") and descendant.Enabled then
+            pcall(function()
+                fireproximityprompt(descendant)
+            end)
+            collected = true
+        end
+    end
+
+    local parentModel = dropPart:FindFirstAncestorOfClass("Model")
+    if parentModel then
+        for _, descendant in ipairs(parentModel:GetDescendants()) do
+            if descendant:IsA("ProximityPrompt") and descendant.Enabled then
+                pcall(function()
+                    fireproximityprompt(descendant)
+                end)
+                collected = true
+            end
+        end
+    end
+
+    if not collected then
+        root.CFrame = dropPart.CFrame + Vector3.new(0, 2, 0)
+        task.wait(0.05)
+        if dropPart:FindFirstChild("TouchInterest") then
+            pcall(function()
+                firetouchinterest(root, dropPart, 0)
+                task.wait(0.05)
+                firetouchinterest(root, dropPart, 1)
+            end)
+            collected = true
+        end
+    end
+
+    return collected
+end
+
+local function getNearbyDrops(maxDistance)
+    local root = getCharacterRoot()
+    if not root then return {} end
+
+    local myPos = root.Position
+    local drops = {}
+    local seen = {}
+
+    local function tryAdd(instance)
+        if isOtherPlayerOwned(instance) then return end
+        if not isDropCandidate(instance) then return end
+
+        local dropPart = getDropPart(instance)
+        if not dropPart or seen[dropPart] then return end
+        if isOtherPlayerOwned(dropPart) then return end
+
+        local distance = (dropPart.Position - myPos).Magnitude
+        if distance > maxDistance then return end
+
+        seen[dropPart] = true
+        table.insert(drops, {
+            part = dropPart,
+            distance = distance,
+        })
+    end
+
+    for _, folderName in ipairs(DROP_FOLDER_NAMES) do
+        local folder = workspace:FindFirstChild(folderName)
+        if folder then
+            for _, child in ipairs(folder:GetDescendants()) do
+                if child:IsA("BasePart") or child:IsA("Model") then
+                    tryAdd(child)
+                end
+            end
+        end
+    end
+
+    for _, descendant in ipairs(workspace:GetDescendants()) do
+        if descendant:IsA("BasePart") and descendant:FindFirstChild("TouchInterest") then
+            tryAdd(descendant)
+        elseif descendant:IsA("Model") and matchesDropKeyword(descendant.Name) then
+            tryAdd(descendant)
+        elseif descendant:IsA("BasePart") and matchesDropKeyword(descendant.Name) then
+            tryAdd(descendant)
+        end
+    end
+
+    table.sort(drops, function(a, b)
+        return a.distance < b.distance
+    end)
+
+    return drops
+end
+
+local function startAutoCollectDrops()
+    if _collectDropsThread then return end
+
+    _collectDropsThread = task.spawn(function()
+        while hubRunning and AutoCollectDropsActive do
+            local root = getCharacterRoot()
+            if root then
+                local drops = getNearbyDrops(120)
+                for _, dropInfo in ipairs(drops) do
+                    if not AutoCollectDropsActive then break end
+                    collectDropPart(root, dropInfo.part)
+                    task.wait(0.1)
+                end
+            end
+            task.wait(0.5)
+        end
+        _collectDropsThread = nil
+    end)
+end
+
+local function stopAutoCollectDrops()
+    AutoCollectDropsActive = false
+end
+
+mainTab:Toggle({
+    Title = "自动采蜜",
+    Value = false,
+    Callback = function(on)
+        AutoHarvestActive = on
+        if on then
+            startAutoHarvest()
+        else
+            stopAutoHarvest()
+        end
+    end,
+})
+
+mainTab:Button({
+    Title = "远程酿蜜",
+    Callback = function()
+        remoteMakeHoney()
+    end,
+})
+
+mainTab:Toggle({
+    Title = "自动收集掉落物",
+    Value = false,
+    Callback = function(on)
+        AutoCollectDropsActive = on
+        if on then
+            startAutoCollectDrops()
+        else
+            stopAutoCollectDrops()
+        end
+    end,
+})
+
+function Atomic.destroyWindUI()
+    hubRunning = false
+    stopAutoHarvest()
+    stopAutoCollectDrops()
+
+    if UIEffects.Connection then
+        UIEffects.Connection:Disconnect()
+        UIEffects.Connection = nil
+    end
+
+    pcall(function()
+        Window:Destroy()
+    end)
+end
+
+getgenv().AtomicUnload = Atomic.destroyWindUI
+UIEffects.InitBorder(Window)
